@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "d_event.h"
 #include "doomgeneric.h"
 #include "doomtype.h"
 #include "i_video.h"
@@ -140,6 +141,54 @@ void I_InitWindowIcon(void) {}
 
 void I_StartFrame(void) {}
 
-void I_StartTic(void) {}
+// **The real bug this closes**: real upstream `i_input.c`'s own `I_GetEvent()` -- not compiled
+// here for the same "real Linux-specific code, doesn't belong in this port" reason `i_video.c`
+// isn't (see this file's own module doc comment) -- is the *only* thing in the entire real Doom
+// engine that ever calls `DG_GetKey()` and turns its result into a real `event_t` the game logic
+// (`g_game.c`'s own `G_Responder`/`G_BuildTiccmd`) actually reads. An earlier draft of this file
+// stubbed `I_StartTic` (real upstream's own call site for `I_GetEvent`) as a bare no-op, matching
+// every other genuinely-inert `i_video.c` symbol here -- but unlike those, this one wasn't inert:
+// it silently meant `DG_GetKey()` was never called by anything, ever. Confirmed live via a
+// temporary diagnostic (`console::keyevents`'s own `record_raw_key_event`, kernel tree): real
+// keystrokes were reliably captured at the kernel's own raw-keyevent layer the whole time, but
+// `SYS_GET_KEYEVENT` was never once actually polled -- every screen change previously taken as
+// "input works" was real vanilla Doom's own built-in attract-mode demo playback running on its
+// own, entirely independent of any real player input. Ported directly from real upstream
+// `i_input.c`'s own `I_GetEvent`/`TranslateKey` (this fork's own `TranslateKey` is a bare identity
+// function -- doomkeys.h's values already match what `g_game.c` expects, no translation table
+// needed) -- **not** ported: `GetTypedChar`'s own shift-case character transform (`data2`, used
+// only for shifted ASCII when typing a savegame name at a text-entry menu, never consulted by any
+// real movement/action key reading) -- `data2` is left honestly `0`, a narrow, documented gap
+// distinct from the real bug this closes.
+void I_StartTic(void)
+{
+	event_t event;
+	int pressed;
+	unsigned char key;
+
+	// Matches real upstream `I_GetEvent`'s own exact loop shape (see this function's own doc
+	// comment for why it's ported this way rather than simplified): keeps draining consecutive
+	// key-*down* events (a real held key's own PS/2 auto-repeat can queue several before this
+	// runs), but stops at the *first* key-up seen -- a real, existing upstream quirk, not
+	// something introduced here.
+	while (DG_GetKey(&pressed, &key)) {
+		event.data2 = 0;
+		event.data3 = 0;
+		event.data4 = 0;
+		event.data1 = key;
+		if (pressed) {
+			event.type = ev_keydown;
+			if (event.data1 != 0) {
+				D_PostEvent(&event);
+			}
+		} else {
+			event.type = ev_keyup;
+			if (event.data1 != 0) {
+				D_PostEvent(&event);
+			}
+			break;
+		}
+	}
+}
 
 void I_EnableLoadingDisk(void) {}
